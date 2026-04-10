@@ -1,4 +1,5 @@
 import datetime
+import os
 import telebot
 from telebot import types
 
@@ -23,6 +24,15 @@ order_counter = 0
 # Ratings storage
 driver_ratings = {}    # driver_chat_id -> list of {stars, comment, timestamp, reviewer_chat_id, order_id}
 passenger_ratings = {} # passenger_chat_id -> list of {stars, comment, timestamp, reviewer_chat_id, order_id}
+
+# Admin settings
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
+admin_authenticated = set()  # set of chat_ids that have authenticated as admin
+
+# Completed orders tracking for commission calculations
+completed_orders = []  # list of {order_id, driver_chat_id, passenger_chat_id, completed_at}
+driver_commissions = {}  # driver_chat_id -> {paid: int, unpaid: int}
+COMMISSION_PER_ORDER = 10  # rubles per completed order
 
 
 def get_average_rating(ratings_dict, chat_id):
@@ -295,6 +305,16 @@ def set_eta(call):
 
     order['status'] = 'completed'
 
+    # Track completed order for commission calculations
+    completed_orders.append({
+        'order_id': order_id,
+        'driver_chat_id': driver_chat_id,
+        'passenger_chat_id': order['passenger_chat_id'],
+        'completed_at': datetime.datetime.now(),
+    })
+    driver_commissions.setdefault(driver_chat_id, {'paid': 0, 'unpaid': 0})
+    driver_commissions[driver_chat_id]['unpaid'] += 1
+
     # Prompt driver to rate passenger
     markup = make_star_rating_markup('rate_passenger', order_id, passenger_chat_id)
     bot.send_message(
@@ -389,6 +409,86 @@ def process_rating_comment(message):
         bot.send_message(chat_id, "✅ Спасибо за оценку пассажира!")
 
     user_state[chat_id].pop('pending_rating', None)
+
+
+def _russian_month(dt):
+    """Return 'Month YYYY' with Russian month name."""
+    months = [
+        'январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
+        'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь',
+    ]
+    return f"{months[dt.month - 1]} {dt.year}"
+
+
+def show_admin_panel(chat_id):
+    """Generate and send the admin panel report."""
+    now = datetime.datetime.now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    total_users = len(drivers) + len(passengers)
+    total_drivers = len(drivers)
+    total_passengers = len(passengers)
+
+    # Monthly orders per driver
+    monthly_orders = {}  # driver_chat_id -> count
+    for record in completed_orders:
+        if record['completed_at'] >= month_start:
+            dcid = record['driver_chat_id']
+            monthly_orders[dcid] = monthly_orders.get(dcid, 0) + 1
+
+    total_monthly_orders = sum(monthly_orders.values())
+    total_revenue = total_monthly_orders * COMMISSION_PER_ORDER
+
+    lines = [
+        "🔐 *Админ-панель*",
+        f"📅 Дата отчёта: {now.strftime('%d.%m.%Y %H:%M')}",
+        "",
+        "👥 *Статистика пользователей*",
+        f"  Всего зарегистрировано: {total_users}",
+        f"  🚕 Водителей: {total_drivers}",
+        f"  🧍 Пассажиров: {total_passengers}",
+        "",
+        f"📊 *Финансовый отчёт за {_russian_month(now)}*",
+        f"  Выполнено заказов: {total_monthly_orders}",
+        f"  Общая выручка: {total_revenue} руб.",
+        "",
+        "💰 *Комиссии водителей (10 руб./заказ)*",
+    ]
+
+    if monthly_orders:
+        for dcid, order_count in monthly_orders.items():
+            driver = drivers.get(dcid, {})
+            name = driver.get('full_name', f'ID {dcid}')
+            commission = order_count * COMMISSION_PER_ORDER
+            paid_orders = driver_commissions.get(dcid, {}).get('paid', 0)
+            unpaid = (order_count - paid_orders) * COMMISSION_PER_ORDER
+            lines.append(
+                f"  • {name}: {order_count} зак. → {commission} руб. (не оплачено: {unpaid} руб.)"
+            )
+    else:
+        lines.append("  Нет заказов в этом месяце.")
+
+    bot.send_message(chat_id, "\n".join(lines), parse_mode='Markdown')
+
+
+@bot.message_handler(commands=['admin'])
+def admin_command(message):
+    chat_id = message.chat.id
+    if chat_id in admin_authenticated:
+        show_admin_panel(chat_id)
+    else:
+        bot.send_message(chat_id, "🔐 Введите пароль администратора:")
+        bot.register_next_step_handler(message, process_admin_password)
+
+
+def process_admin_password(message):
+    chat_id = message.chat.id
+    if message.text == ADMIN_PASSWORD:
+        admin_authenticated.add(chat_id)
+        bot.send_message(chat_id, "✅ Авторизация успешна!")
+        show_admin_panel(chat_id)
+    else:
+        bot.send_message(chat_id, "❌ Неверный пароль.")
 
 
 bot.polling()
