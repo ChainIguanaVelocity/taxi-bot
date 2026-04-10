@@ -10,6 +10,7 @@ class Driver(models.Model):
     license_number = models.CharField(max_length=255)
     vehicle_model = models.CharField(max_length=255)
     vehicle_number = models.CharField(max_length=255)
+    vehicle_class = models.CharField(max_length=50, default='Эконом')
 
 class Passenger(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
@@ -20,6 +21,7 @@ class Order(models.Model):
     pick_up_location = models.CharField(max_length=255)
     drop_off_location = models.CharField(max_length=255)
     order_time = models.DateTimeField(auto_now_add=True)
+    eta = models.PositiveSmallIntegerField(null=True, blank=True)
 
 class Payment(models.Model):
     order = models.OneToOneField(Order, on_delete=models.CASCADE)
