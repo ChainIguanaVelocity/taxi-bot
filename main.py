@@ -1,3 +1,4 @@
+import datetime
 import telebot
 from telebot import types
 
@@ -18,6 +19,40 @@ passengers = {}  # chat_id -> passenger data dict
 # Orders storage
 pending_orders = {}  # order_id -> order dict
 order_counter = 0
+
+# Ratings storage
+driver_ratings = {}    # driver_chat_id -> list of {stars, comment, timestamp, reviewer_chat_id, order_id}
+passenger_ratings = {} # passenger_chat_id -> list of {stars, comment, timestamp, reviewer_chat_id, order_id}
+
+
+def get_average_rating(ratings_dict, chat_id):
+    """Returns (average, count) or (None, 0) if no ratings."""
+    ratings = ratings_dict.get(chat_id, [])
+    if not ratings:
+        return None, 0
+    avg = sum(r['stars'] for r in ratings) / len(ratings)
+    return round(avg, 1), len(ratings)
+
+
+def format_rating_text(ratings_dict, chat_id):
+    avg, count = get_average_rating(ratings_dict, chat_id)
+    if avg is None:
+        return "нет оценок"
+    stars_emoji = '⭐' * round(avg)
+    return f"{stars_emoji} {avg} ({count} отз.)"
+
+
+def make_star_rating_markup(callback_prefix, order_id, target_chat_id):
+    markup = types.InlineKeyboardMarkup(row_width=5)
+    buttons = [
+        types.InlineKeyboardButton(
+            '⭐' * i,
+            callback_data=f"{callback_prefix}_{order_id}_{target_chat_id}_{i}"
+        )
+        for i in range(1, 6)
+    ]
+    markup.add(*buttons)
+    return markup
 
 
 @bot.message_handler(commands=['start'])
@@ -150,6 +185,7 @@ def process_dropoff(message):
 
     # Notify all registered drivers about the new order
     for driver_chat_id in drivers:
+        passenger_rating_text = format_rating_text(passenger_ratings, chat_id)
         markup = types.InlineKeyboardMarkup()
         accept_button = types.InlineKeyboardButton(
             f"Принять заказ #{order_id}",
@@ -160,7 +196,8 @@ def process_dropoff(message):
             driver_chat_id,
             f"🚕 Новый заказ #{order_id}!\n"
             f"📍 Откуда: {pickup}\n"
-            f"🎯 Куда: {dropoff}",
+            f"🎯 Куда: {dropoff}\n"
+            f"👤 Рейтинг пассажира: {passenger_rating_text}",
             reply_markup=markup
         )
 
@@ -173,6 +210,7 @@ def show_available_orders(message):
         return
 
     for order in available:
+        passenger_rating_text = format_rating_text(passenger_ratings, order['passenger_chat_id'])
         markup = types.InlineKeyboardMarkup()
         accept_button = types.InlineKeyboardButton(
             f"Принять заказ #{order['id']}",
@@ -183,7 +221,8 @@ def show_available_orders(message):
             message.chat.id,
             f"🚕 Заказ #{order['id']}\n"
             f"📍 Откуда: {order['pickup']}\n"
-            f"🎯 Куда: {order['dropoff']}",
+            f"🎯 Куда: {order['dropoff']}\n"
+            f"👤 Рейтинг пассажира: {passenger_rating_text}",
             reply_markup=markup
         )
 
@@ -244,15 +283,112 @@ def set_eta(call):
 
     # Notify passenger
     passenger_chat_id = order['passenger_chat_id']
+    driver_rating_text = format_rating_text(driver_ratings, driver_chat_id)
     bot.send_message(
         passenger_chat_id,
         f"🚕 Ваш заказ #{order_id} принят!\n"
         f"Водитель: {driver.get('full_name', '')}\n"
         f"Автомобиль: {driver.get('car_brand', '')} ({driver.get('car_number', '')})\n"
+        f"⭐ Рейтинг водителя: {driver_rating_text}\n"
         f"⏱️ Время прибытия: {eta_minutes} мин."
     )
 
     order['status'] = 'completed'
+
+    # Prompt driver to rate passenger
+    markup = make_star_rating_markup('rate_passenger', order_id, passenger_chat_id)
+    bot.send_message(
+        driver_chat_id,
+        "🏁 Поездка завершена! Оцените пассажира:",
+        reply_markup=markup
+    )
+
+    # Prompt passenger to rate driver
+    markup = make_star_rating_markup('rate_driver', order_id, driver_chat_id)
+    bot.send_message(
+        passenger_chat_id,
+        "🏁 Ваша поездка завершена! Оцените водителя:",
+        reply_markup=markup
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rate_driver_'))
+def rate_driver_callback(call):
+    parts = call.data.split('_')
+    # callback_data: rate_driver_{order_id}_{driver_chat_id}_{stars}
+    order_id = int(parts[2])
+    driver_chat_id = int(parts[3])
+    stars = int(parts[4])
+    reviewer_chat_id = call.message.chat.id
+
+    bot.answer_callback_query(call.id, f"Вы поставили {'⭐' * stars}!")
+
+    user_state.setdefault(reviewer_chat_id, {})['pending_rating'] = {
+        'type': 'driver',
+        'target_id': driver_chat_id,
+        'order_id': order_id,
+        'stars': stars,
+        'reviewer_id': reviewer_chat_id,
+    }
+
+    bot.send_message(
+        reviewer_chat_id,
+        f"Вы поставили {'⭐' * stars}!\nДобавьте комментарий или отправьте /skip:"
+    )
+    bot.register_next_step_handler(call.message, process_rating_comment)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rate_passenger_'))
+def rate_passenger_callback(call):
+    parts = call.data.split('_')
+    # callback_data: rate_passenger_{order_id}_{passenger_chat_id}_{stars}
+    order_id = int(parts[2])
+    passenger_chat_id = int(parts[3])
+    stars = int(parts[4])
+    reviewer_chat_id = call.message.chat.id
+
+    bot.answer_callback_query(call.id, f"Вы поставили {'⭐' * stars}!")
+
+    user_state.setdefault(reviewer_chat_id, {})['pending_rating'] = {
+        'type': 'passenger',
+        'target_id': passenger_chat_id,
+        'order_id': order_id,
+        'stars': stars,
+        'reviewer_id': reviewer_chat_id,
+    }
+
+    bot.send_message(
+        reviewer_chat_id,
+        f"Вы поставили {'⭐' * stars}!\nДобавьте комментарий или отправьте /skip:"
+    )
+    bot.register_next_step_handler(call.message, process_rating_comment)
+
+
+def process_rating_comment(message):
+    chat_id = message.chat.id
+    pending = user_state.get(chat_id, {}).get('pending_rating')
+    if not pending:
+        return
+
+    comment = '' if message.text == '/skip' else message.text
+
+    rating_entry = {
+        'stars': pending['stars'],
+        'comment': comment,
+        'timestamp': datetime.datetime.now().isoformat(),
+        'reviewer_chat_id': pending['reviewer_id'],
+        'order_id': pending['order_id'],
+    }
+
+    target_id = pending['target_id']
+    if pending['type'] == 'driver':
+        driver_ratings.setdefault(target_id, []).append(rating_entry)
+        bot.send_message(chat_id, "✅ Спасибо за оценку водителя!")
+    else:
+        passenger_ratings.setdefault(target_id, []).append(rating_entry)
+        bot.send_message(chat_id, "✅ Спасибо за оценку пассажира!")
+
+    user_state[chat_id].pop('pending_rating', None)
 
 
 bot.polling()
