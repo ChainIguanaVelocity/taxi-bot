@@ -298,6 +298,7 @@ def set_eta(call):
         passenger_chat_id,
         f"🚕 Ваш заказ #{order_id} принят!\n"
         f"Водитель: {driver.get('full_name', '')}\n"
+        f"📞 Телефон водителя: {driver.get('phone_number', '')}\n"
         f"Автомобиль: {driver.get('car_brand', '')} ({driver.get('car_number', '')})\n"
         f"⭐ Рейтинг водителя: {driver_rating_text}\n"
         f"⏱️ Время прибытия: {eta_minutes} мин."
