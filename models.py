@@ -15,11 +15,12 @@ class Passenger(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
 
 class Order(models.Model):
-    driver = models.ForeignKey(Driver, on_delete=models.CASCADE)
+    driver = models.ForeignKey(Driver, on_delete=models.SET_NULL, null=True, blank=True)
     passenger = models.ForeignKey(Passenger, on_delete=models.CASCADE)
     pick_up_location = models.CharField(max_length=255)
     drop_off_location = models.CharField(max_length=255)
     order_time = models.DateTimeField(auto_now_add=True)
+    eta_minutes = models.IntegerField(null=True, blank=True)
 
 class Payment(models.Model):
     order = models.OneToOneField(Order, on_delete=models.CASCADE)
